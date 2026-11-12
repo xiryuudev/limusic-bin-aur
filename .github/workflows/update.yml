@@ -53,6 +53,10 @@ jobs:
       - name: Compare upstream latest with PKGBUILD and AUR
         id: check
         run: ./scripts/check-update.sh
+        env:
+          # Unauthenticated GitHub API is 60 requests/hour per IP and shared
+          # runner IPs exhaust it; the token lifts this to 1000/hour.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ---------------------------------------------------------------------------
   # 2. Build + validate + publish, inside a real Arch container.

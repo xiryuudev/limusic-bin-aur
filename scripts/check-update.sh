@@ -27,13 +27,29 @@ repo_pkgver="$(pkgbuild_var PKGBUILD pkgver)"
 
 # ---------------------------------------------------------------------------
 # Upstream: newest STABLE release (/releases/latest ignores drafts+prereleases).
+#
+# The unauthenticated GitHub API allows only 60 requests/hour per IP, and shared
+# runner IPs often exhaust that. Authenticate when a token is present: inside
+# Actions, GITHUB_TOKEN raises the limit to 1000/hour for this repository.
 # ---------------------------------------------------------------------------
 api_get() {
+  local -a auth=()
+  local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  if [ -n "$token" ]; then
+    auth=(-H "Authorization: Bearer ${token}")
+  fi
   curl -fsSL --retry 3 --retry-delay 2 --max-time 60 \
     -H "Accept: application/vnd.github+json" \
     -H "User-Agent: ${USER_AGENT}" \
+    "${auth[@]}" \
     "$1"
 }
+
+if [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
+  log "using an authenticated GitHub API request"
+else
+  warn "no GH_TOKEN/GITHUB_TOKEN set — using the 60/hour unauthenticated API limit"
+fi
 
 release_json="$(api_get "${GITHUB_API}/repos/${UPSTREAM_REPO}/releases/latest")" \
   || die "GitHub API request failed for ${UPSTREAM_REPO} (rate limit or network?)"
