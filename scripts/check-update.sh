@@ -119,10 +119,13 @@ if [ "$rpc_ok" = false ]; then
   exit 0
 fi
 
-if [ -z "$aur_version" ]; then
+if [ -z "$aur_full" ]; then
   # RPC answered and the package is not on the AUR yet: a publish is wanted.
   log "AUR reports no such package — treating as not yet published"
   aur_version="0"
+  aur_pkgrel=""
+else
+  aur_pkgrel="${aur_full#*-}"   # 1.3.0-2 -> 2
 fi
 
 # ---------------------------------------------------------------------------
@@ -158,14 +161,32 @@ fi
 # Recipe drift: the repo's PKGBUILD can be correct while the AUR's copy is stale
 # at the same pkgver — a dependency or install-script fix does not change
 # upstream's version. Without this check such a fix would never be published.
-# Fetched over HTTP so the check stays on the cheap runner (no container).
+#
+# The AUR's git repository is authoritative and reflects a push immediately. Its
+# cgit plain-text view is deliberately NOT used: it lags the git repo by
+# minutes, which produced a false "drift" after every publish and therefore a
+# full rebuild on every scheduled run.
 # ---------------------------------------------------------------------------
+aur_git_pkgbuild() {
+  # Shallow fetch of just the PKGBUILD. Falls back to the cgit view (last
+  # resort) when git is not available on the check runner.
+  local dir="${WORKDIR_CHECK}/aur-git"
+  rm -rf "$dir"
+  if command -v git >/dev/null 2>&1; then
+    if GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --filter=blob:none --no-checkout \
+      "https://aur.archlinux.org/${AUR_PKGNAME}.git" "$dir" >/dev/null 2>&1; then
+      git -C "$dir" show HEAD:PKGBUILD 2>/dev/null && return 0
+    fi
+  fi
+  curl -fsSL --retry 2 --max-time 30 -H "User-Agent: ${USER_AGENT}" \
+    "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=${AUR_PKGNAME}" 2>/dev/null
+}
+
 recipe_drift=false
+local_rel="$(pkgbuild_var PKGBUILD pkgrel)"
 if [ -n "${WORKDIR_CHECK:-}" ]; then
   mkdir -p "$WORKDIR_CHECK"
-  aur_pkgbuild_text="$(curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
-    -H "User-Agent: ${USER_AGENT}" \
-    "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=${AUR_PKGNAME}" 2>/dev/null || true)"
+  aur_pkgbuild_text="$(aur_git_pkgbuild 2>/dev/null || true)"
 
   if [ -n "$aur_pkgbuild_text" ]; then
     printf '%s\n' "$aur_pkgbuild_text" >"${WORKDIR_CHECK}/aur.PKGBUILD"
@@ -173,11 +194,16 @@ if [ -n "${WORKDIR_CHECK:-}" ]; then
     normalize_pkgbuild_file PKGBUILD >"${WORKDIR_CHECK}/local.norm"
     if ! diff -q "${WORKDIR_CHECK}/aur.norm" "${WORKDIR_CHECK}/local.norm" >/dev/null 2>&1; then
       recipe_drift=true
-      log "repo PKGBUILD differs from the AUR copy at ${latest_version}:"
+      log "repo PKGBUILD differs from the AUR git copy:"
       diff -u "${WORKDIR_CHECK}/aur.norm" "${WORKDIR_CHECK}/local.norm" >&2 || true
     fi
+  elif [ -n "$aur_pkgrel" ] && [ -n "$local_rel" ] && [ "$aur_pkgrel" != "$local_rel" ]; then
+    # Git copy unavailable but the RPC already tells us the published pkgrel
+    # differs, which can only mean our recipe has not been pushed yet.
+    recipe_drift=true
+    log "AUR pkgrel ${aur_pkgrel} differs from local pkgrel ${local_rel}"
   else
-    log "could not fetch the AUR PKGBUILD; skipping the recipe-drift comparison"
+    log "AUR git copy unavailable; skipping the recipe-drift comparison"
   fi
 fi
 

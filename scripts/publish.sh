@@ -93,11 +93,26 @@ case "$aur_remote" in
     # newlines, so one unconditional conversion handles both forms.
     printf '%b\n' "${AUR_SSH_PRIVATE_KEY//\\n/$'\n'}" >"$keyfile"
     chmod 600 "$keyfile"
+
+    # Diagnose the secret before wasting an SSH round-trip on it.
+    if grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9]+|sk-ssh-ed25519@openssh\.com) ' "$keyfile"; then
+      die "AUR_SSH_PRIVATE_KEY contains a PUBLIC key (it starts with 'ssh-ed25519 ...').
+Set the secret to the PRIVATE key file instead — the one that begins with
+'-----BEGIN OPENSSH PRIVATE KEY-----' (on your machine: cat ~/.ssh/aur)."
+    fi
     grep -q 'BEGIN .*PRIVATE KEY' "$keyfile" \
-      || die "AUR_SSH_PRIVATE_KEY does not look like a PEM private key"
-    command -v ssh-keygen >/dev/null 2>&1 \
-      && ssh-keygen -y -f "$keyfile" >/dev/null 2>&1 \
-      || warn "could not validate the SSH key locally (ssh-keygen unavailable or key encrypted)"
+      || die "AUR_SSH_PRIVATE_KEY does not look like a PEM private key."
+
+    if command -v ssh-keygen >/dev/null 2>&1; then
+      if derived_pub="$(ssh-keygen -y -f "$keyfile" 2>&1)"; then
+        log "key fingerprint: $(printf '%s' "$derived_pub" | ssh-keygen -lf - 2>/dev/null || echo '?')"
+      else
+        die "AUR_SSH_PRIVATE_KEY is not a usable private key:
+${derived_pub}
+If the key has a passphrase it cannot be used in CI — generate one without
+passphrase (ssh-keygen ... -N '')."
+      fi
+    fi
 
     export GIT_SSH_COMMAND="ssh -F /dev/null -i ${keyfile} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${known_hosts}"
     ;;
