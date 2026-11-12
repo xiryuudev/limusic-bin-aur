@@ -1,0 +1,165 @@
+name: limusic-bin AUR update
+
+# Checks upstream SimoHypers/limusic for a new stable release, rebuilds
+# PKGBUILD/.SRCINFO, validates them with a real makepkg build plus namcap, and
+# only then pushes to the AUR. Any problem stops the run before the AUR is
+# touched.
+#
+# GitHub's minimum schedule interval is 5 minutes, and scheduled runs may be
+# delayed when the runners are busy. See README.md ("Lebih cepat dari 5 menit")
+# for a 1-minute trigger via an external cron calling workflow_dispatch.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Rebuild and re-validate even when upstream shows no new version'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+# One update at a time: concurrent pushes would race on the AUR.
+concurrency:
+  group: limusic-bin-aur-update
+  cancel-in-progress: false
+
+env:
+  AUR_PKGNAME: limusic-bin
+  UPSTREAM_REPO: SimoHypers/limusic
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Cheap check on the runner (no container): a few seconds per run.
+  # ---------------------------------------------------------------------------
+  check:
+    name: check upstream release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      update_needed: ${{ steps.check.outputs.update_needed }}
+      version: ${{ steps.check.outputs.version }}
+      release_tag: ${{ steps.check.outputs.release_tag }}
+      deb_url: ${{ steps.check.outputs.deb_url }}
+      deb_api_digest: ${{ steps.check.outputs.deb_api_digest }}
+      reason: ${{ steps.check.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare upstream latest with PKGBUILD and AUR
+        id: check
+        run: ./scripts/check-update.sh
+
+  # ---------------------------------------------------------------------------
+  # 2. Build + validate + publish, inside a real Arch container.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: build, validate, publish
+    needs: check
+    if: needs.check.outputs.update_needed == 'true' || inputs.force
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    timeout-minutes: 45
+    steps:
+      # The archlinux:base-devel image ships neither git nor ssh, and
+      # actions/checkout needs git before ci-setup.sh can run. Use a full
+      # sysupgrade: `pacman -Sy <pkg>` alone is the partial-upgrade pattern that
+      # Arch forbids, and on a dated rolling image it can install a git built
+      # against a newer glibc than the image carries.
+      - name: Bootstrap git and ssh
+        run: pacman -Syu --noconfirm --needed --quiet git openssh >/dev/null
+
+      - uses: actions/checkout@v4
+
+      - name: Install build tooling and build user
+        run: ./scripts/ci-setup.sh
+
+      - name: Render PKGBUILD, build, run namcap
+        run: >-
+          ./scripts/as-builder.sh ./scripts/ci-build.sh
+          "${VERSION}" "${DEB_URL}"
+        env:
+          SRC_DIR: ${{ github.workspace }}
+          EXPECTED_DIGEST: ${{ needs.check.outputs.deb_api_digest }}
+          VERSION: ${{ needs.check.outputs.version }}
+          DEB_URL: ${{ needs.check.outputs.deb_url }}
+
+      - name: Show resulting PKGBUILD
+        run: |
+          sed -n '1,40p' PKGBUILD
+          echo '--- .SRCINFO ---'
+          sed -n '1,40p' .SRCINFO
+
+      # The AUR is only written once build + namcap + verification have passed.
+      - name: Publish to AUR
+        id: publish
+        run: ./scripts/publish.sh "${VERSION}"
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
+          AUR_EMAIL: ${{ secrets.AUR_EMAIL }}
+          WORKDIR: /tmp/aur-publish
+
+      # Runs whenever the payload changed, including the "AUR already had it"
+      # case: that repairs a repo whose state commit failed on an earlier run and
+      # stops the next schedule from rebuilding the same version forever.
+      - name: Commit new state to this repository
+        if: steps.publish.outputs.published == 'true' || steps.publish.outputs.push_reason == 'AUR already up to date'
+        run: ./scripts/commit-state.sh "${VERSION}" "${{ steps.publish.outputs.commit_sha }}"
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          WORKDIR: /tmp/aur-state
+          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+
+  # ---------------------------------------------------------------------------
+  # 3. Keep a single issue open while the automation is broken. Nothing is
+  #    pushed to the AUR on a failed run, so this is the only signal.
+  # ---------------------------------------------------------------------------
+  notify-failure:
+    name: report failure
+    needs: [check, publish]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update a failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          VERSION: ${{ needs.check.outputs.version }}
+          REASON: ${{ needs.check.outputs.reason }}
+        run: |
+          set -euo pipefail
+          title='limusic-bin automation failed'
+          api="https://api.github.com/repos/${REPO}"
+
+          existing="$(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${api}/issues?state=open&labels=automation&per_page=100" \
+            | jq -r --arg t "$title" '[.[] | select(.title == $t)] | first | .number // empty')"
+
+          body="$(printf 'Workflow run failed: %s\n\n- upstream version: `%s`\n- check reason: %s\n\nThe AUR was **not** modified by this run.\n' \
+            "$RUN_URL" "${VERSION:-unknown}" "${REASON:-unknown}")"
+
+          if [ -n "$existing" ]; then
+            curl -fsS -X POST -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${api}/issues/${existing}/comments" \
+              -d "$(jq -n --arg b "$body" '{body:$b}')" >/dev/null
+            echo "commented on issue #${existing}"
+          else
+            curl -fsS -X POST -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${api}/issues" \
+              -d "$(jq -n --arg t "$title" --arg b "$body" \
+                    '{title:$t, body:$b, labels:["automation"]}')" >/dev/null
+            echo "opened issue: ${title}"
+          fi

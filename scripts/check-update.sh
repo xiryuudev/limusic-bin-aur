@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# Detect whether upstream SimoHypers/limusic has a release newer than what the
+# AUR package (and this repo) already carries.
+#
+# Reads:  PKGBUILD in the checkout
+# Writes: GitHub Actions outputs (update_needed, version, release_tag, reason...)
+# Exit:   0 always when the check itself succeeded; non-zero only on API/parse errors.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+source "${SCRIPT_DIR}/lib.sh"
+
+: "${UPSTREAM_REPO:=SimoHypers/limusic}"
+: "${AUR_PKGNAME:=limusic-bin}"
+: "${GITHUB_API:=https://api.github.com}"
+: "${USER_AGENT:=limusic-bin-aur-automation}"
+
+require_cmd curl jq
+
+# ---------------------------------------------------------------------------
+# Current version in this repository (the mirror of the AUR PKGBUILD).
+# ---------------------------------------------------------------------------
+[ -f PKGBUILD ] || die "PKGBUILD not found in $(pwd)"
+repo_pkgver="$(pkgbuild_var PKGBUILD pkgver)"
+[ -n "$repo_pkgver" ] || die "could not read pkgver from PKGBUILD"
+
+# ---------------------------------------------------------------------------
+# Upstream: newest STABLE release (/releases/latest ignores drafts+prereleases).
+# ---------------------------------------------------------------------------
+api_get() {
+  curl -fsSL --retry 3 --retry-delay 2 --max-time 60 \
+    -H "Accept: application/vnd.github+json" \
+    -H "User-Agent: ${USER_AGENT}" \
+    "$1"
+}
+
+release_json="$(api_get "${GITHUB_API}/repos/${UPSTREAM_REPO}/releases/latest")" \
+  || die "GitHub API request failed for ${UPSTREAM_REPO} (rate limit or network?)"
+
+release_tag="$(jq -r '.tag_name // empty' <<<"$release_json")"
+[ -n "$release_tag" ] || die "upstream has no stable release (tag_name missing)"
+
+latest_version="${release_tag#v}"
+
+# The .deb used by the PKGBUILD. Name derived from pkgver, as upstream always
+# publishes limusic_<version>_amd64.deb.
+deb_name="limusic_${latest_version}_amd64.deb"
+deb_json="$(jq -c --arg n "$deb_name" '.assets[]? | select(.name == $n)' <<<"$release_json")"
+if [ -z "$deb_json" ]; then
+  die "release ${release_tag} has no asset named ${deb_name} (asset naming changed upstream?)"
+fi
+deb_url="$(jq -r '.browser_download_url' <<<"$deb_json")"
+deb_api_digest="$(jq -r '.digest // empty' <<<"$deb_json")"
+
+# ---------------------------------------------------------------------------
+# What the AUR currently serves. A failed RPC must NOT be read as "AUR is at 0":
+# that would schedule a full 45-minute rebuild every 5 minutes for the whole
+# outage. Only a successful response may move this decision.
+# ---------------------------------------------------------------------------
+aur_version=""
+aur_raw="$(curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
+  "https://aur.archlinux.org/rpc/v5/info?arg[]=${AUR_PKGNAME}" 2>/dev/null || true)"
+
+if [ -n "$aur_raw" ] && printf '%s' "$aur_raw" | jq -e '.type == "multiinfo"' >/dev/null 2>&1; then
+  aur_resultcount="$(printf '%s' "$aur_raw" | jq -r '.resultcount // 0')"
+  if [ "$aur_resultcount" -gt 0 ]; then
+    aur_full="$(printf '%s' "$aur_raw" | jq -r '.results[0].Version // empty')"
+    if [ -n "$aur_full" ]; then
+      aur_version="${aur_full%-*}"   # 1.3.0-1 -> 1.3.0
+    fi
+  fi
+fi
+
+if [ -z "$aur_version" ]; then
+  # Either the package is not on the AUR yet, or the RPC did not answer. Pushing
+  # is still safe (publish.sh re-reads the real AUR checkout), but say so.
+  warn "could not determine the AUR version (RPC unavailable or package absent); assuming out of date"
+  aur_version="0"
+fi
+
+# ---------------------------------------------------------------------------
+# Decide. vercmp comes from pacman; absent locally we fall back to sort -V.
+# ---------------------------------------------------------------------------
+vcmp() {
+  if command -v vercmp >/dev/null 2>&1; then
+    local r
+    r="$(vercmp "$1" "$2")"
+    if [ "$r" -lt 0 ]; then echo -1; elif [ "$r" -gt 0 ]; then echo 1; else echo 0; fi
+  else
+    local hi lo
+    hi="$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)"
+    lo="$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)"
+    if [ "$hi" = "$lo" ]; then echo 0; elif [ "$hi" = "$1" ]; then echo 1; else echo -1; fi
+  fi
+}
+
+vs_repo="$(vcmp "$latest_version" "$repo_pkgver")"
+vs_aur="$(vcmp "$latest_version" "$aur_version")"
+
+# Upstream has re-uploaded assets for an existing tag before (a fixed checksum
+# without a version bump). If the release still advertises our version, compare
+# the API digest against the checksum we already publish and refresh if it moved.
+repo_sha="$(pkgbuild_var PKGBUILD sha256sums)"
+api_sha="${deb_api_digest#sha256:}"
+checksum_changed=false
+if [ "$vs_repo" -eq 0 ] && [ -n "$repo_sha" ] && [ -n "$api_sha" ] && [ "$repo_sha" != "$api_sha" ]; then
+  checksum_changed=true
+fi
+
+update_needed=false
+reason="already up to date"
+
+if [ "$vs_repo" -gt 0 ]; then
+  update_needed=true
+  reason="upstream ${latest_version} is newer than repo pkgver ${repo_pkgver}"
+elif [ "$checksum_changed" = true ]; then
+  update_needed=true
+  reason="upstream re-uploaded ${latest_version}: checksum ${repo_sha:0:16}… -> ${api_sha:0:16}…"
+elif [ "$vs_aur" -gt 0 ]; then
+  # Repo is current but the AUR is behind: re-publish without re-rendering.
+  update_needed=true
+  reason="repo is current (${repo_pkgver}) but AUR is behind (${aur_version})"
+elif [ "$vs_repo" -lt 0 ]; then
+  reason="repo pkgver ${repo_pkgver} is ahead of upstream ${latest_version}"
+fi
+
+log "upstream : ${latest_version} (${release_tag})"
+log "repo     : ${repo_pkgver}"
+log "aur      : ${aur_version}"
+log "decision : ${reason}"
+
+set_output update_needed "$update_needed"
+set_output version "$latest_version"
+set_output release_tag "$release_tag"
+set_output deb_url "$deb_url"
+set_output deb_name "$deb_name"
+set_output deb_api_digest "$deb_api_digest"
+set_output repo_pkgver "$repo_pkgver"
+set_output aur_version "$aur_version"
+set_output checksum_changed "$checksum_changed"
+set_output reason "$reason"
+
+summary "### limusic-bin update check"
+summary ""
+summary "| item | value |"
+summary "| --- | --- |"
+summary "| upstream latest (stable) | \`${latest_version}\` |"
+summary "| repo PKGBUILD | \`${repo_pkgver}\` |"
+summary "| AUR | \`${aur_version}\` |"
+summary "| checksum changed upstream | ${checksum_changed} |"
+summary "| decision | ${update_needed} — ${reason} |"

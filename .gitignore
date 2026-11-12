@@ -1,0 +1,7 @@
+# Build/validation leftovers — never commit these to an AUR repo.
+.aur-build/
+*.pkg.tar.*
+*.pkg.tar.zst
+*.deb
+src/
+pkg/
