@@ -75,27 +75,25 @@ if [ -n "$deps_line" ]; then
   if [ -z "$missing" ]; then
     log "all declared dependencies already satisfied"
   else
-    pkgs=()
+    # Install the unmet specs *as written*. pacman resolves a soname provides to
+    # the owning package itself (libmpv.so=2-64 -> mpv, libcrypto.so=3-64 ->
+    # openssl-3), which is what namcap needs to verify the dependencies. Deriving
+    # a package name by stripping ".so..." is wrong: it turns mpv into libmpv.
+    specs=()
     while IFS= read -r spec; do
       if [ -n "$spec" ]; then
-        name="${spec%%[<>=]*}"   # libmpv.so=2-64 -> libmpv.so
-        name="${name%%.so*}"     # libmpv.so      -> libmpv
-        if [ -n "$name" ]; then
-          pkgs+=("$name")
-        fi
+        specs+=("$spec")
       fi
     done <<<"$missing"
 
-    if [ "${#pkgs[@]}" -eq 0 ]; then
-      warn "could not map the missing dependencies to package names; skipping"
+    if [ "${#specs[@]}" -eq 0 ]; then
+      warn "could not parse the unmet dependencies; skipping"
     else
-      log "installing: ${pkgs[*]}"
-      # Install one by one: a single unavailable package must not prevent the
-      # others from being installed (namcap needs as many as it can get).
+      log "installing: ${specs[*]}"
       install_failed=0
-      for pkg in "${pkgs[@]}"; do
-        if ! pacman -S --noconfirm --needed --asdeps --quiet "$pkg" >/dev/null 2>&1; then
-          warn "could not install runtime dependency '${pkg}'"
+      for spec in "${specs[@]}"; do
+        if ! pacman -S --noconfirm --needed --asdeps --quiet "$spec" >/dev/null 2>&1; then
+          warn "could not install runtime dependency '${spec}'"
           install_failed=$((install_failed + 1))
         fi
       done

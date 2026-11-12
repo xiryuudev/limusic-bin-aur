@@ -127,12 +127,27 @@ aur_pkgver="$(pkgbuild_var PKGBUILD pkgver 2>/dev/null || true)"
 aur_sha="$(pkgbuild_var PKGBUILD sha256sums 2>/dev/null || true)"
 log "AUR currently: pkgver=${aur_pkgver:-<none>} sha256=${aur_sha:0:16}..."
 
-if [ "$aur_pkgver" = "$version" ] && [ "$aur_sha" = "$local_sha" ]; then
-  log "AUR already carries ${version} with the same checksum — nothing to push"
-  set_output published false
-  set_output push_reason "AUR already up to date"
-  summary "### publish: skipped (AUR already at \`${version}\`)"
-  exit 0
+# Compare the whole PKGBUILD, not just pkgver+checksum: a dependency or install
+# script fix for an unchanged upstream version must still reach the AUR.
+if normalize_pkgbuild_file PKGBUILD >"${WORKDIR}/aur.PKGBUILD.norm" 2>/dev/null \
+  && normalize_pkgbuild_file "${REPO_ROOT}/PKGBUILD" >"${WORKDIR}/local.PKGBUILD.norm"; then
+  if diff -q "${WORKDIR}/aur.PKGBUILD.norm" "${WORKDIR}/local.PKGBUILD.norm" >/dev/null 2>&1; then
+    log "AUR PKGBUILD is identical to the local one — nothing to push"
+    set_output published false
+    set_output push_reason "AUR already up to date"
+    summary "### publish: skipped (AUR PKGBUILD already matches)"
+    exit 0
+  fi
+  log "PKGBUILD differs from the AUR copy — a push is needed"
+  diff -u "${WORKDIR}/aur.PKGBUILD.norm" "${WORKDIR}/local.PKGBUILD.norm" >&2 || true
+else
+  # Fall back to the version+checksum heuristic if either file is unreadable.
+  if [ "$aur_pkgver" = "$version" ] && [ "$aur_sha" = "$local_sha" ]; then
+    log "AUR already carries ${version} with the same checksum — nothing to push"
+    set_output published false
+    set_output push_reason "AUR already up to date"
+    exit 0
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -157,8 +172,13 @@ fi
 
 if [ "$aur_pkgver" != "$version" ]; then
   commit_msg="upgpkg: ${AUR_PKGNAME} ${version}"
-else
+elif [ "$aur_sha" != "$local_sha" ]; then
   commit_msg="upgpkg: ${AUR_PKGNAME} ${version} (checksum refresh)"
+else
+  # Same version and same payload, but the recipe itself changed (dependencies,
+  # prepare()/package(), options...). AUR convention keeps the version in the
+  # subject; the pkgrel bump already makes pacman rebuild for users.
+  commit_msg="upgpkg: ${AUR_PKGNAME} ${version} (PKGBUILD refresh)"
 fi
 
 git commit --quiet -m "$commit_msg" --author="${git_name} <${git_email}>"

@@ -79,11 +79,12 @@ if [ "$previous_version" != "$version" ]; then
   new_rel=1
   rel_reason="new upstream version"
 else
-  # Same version but a different payload (upstream re-uploaded the asset).
-  # The AUR only rebuilds for users when pkgver-pkgrel moves, so bump pkgrel.
+  # Same upstream version. Whatever changed, users only see it if pkgver-pkgrel
+  # moves, so keep an already-bumped pkgrel and never lower it; bump only when
+  # the payload itself changed.
   if [ "$previous_sha" = "$sha256" ]; then
     new_rel="${previous_rel:-1}"
-    rel_reason="no payload change"
+    rel_reason="no payload change (pkgrel kept)"
   else
     new_rel=$(( ${previous_rel:-0} + 1 ))
     rel_reason="payload changed for the same version"

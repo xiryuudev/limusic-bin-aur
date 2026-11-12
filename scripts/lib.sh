@@ -68,3 +68,12 @@ pkgbuild_var() { # file name
 srcinfo_var() { # file name
   awk -v key="$2" '$1 == key && $2 == "=" { print $3; exit }' "$1"
 }
+
+# Print a PKGBUILD in a canonical form for comparison: trailing whitespace
+# removed, runs of blank lines collapsed. Comments are kept, because the
+# Maintainer line and short notes are real content a maintainer changes on
+# purpose; the comparison is a plain diff, so cosmetic churn converges after the
+# first push instead of looping.
+normalize_pkgbuild_file() { # file
+  sed -E 's/[[:space:]]+$//' "$1" 2>/dev/null | awk 'BEGIN{blank=0} /^$/{blank++; if(blank>1) next} !/^$/{blank=0} {print}'
+}

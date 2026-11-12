@@ -15,6 +15,7 @@ source "${SCRIPT_DIR}/lib.sh"
 : "${AUR_PKGNAME:=limusic-bin}"
 : "${GITHUB_API:=https://api.github.com}"
 : "${USER_AGENT:=limusic-bin-aur-automation}"
+: "${WORKDIR_CHECK:=${RUNNER_TEMP:-/tmp}/limusic-check}"
 
 require_cmd curl jq
 
@@ -153,6 +154,33 @@ if [ "$vs_repo" -eq 0 ] && [ -n "$repo_sha" ] && [ -n "$api_sha" ] && [ "$repo_s
   checksum_changed=true
 fi
 
+# ---------------------------------------------------------------------------
+# Recipe drift: the repo's PKGBUILD can be correct while the AUR's copy is stale
+# at the same pkgver — a dependency or install-script fix does not change
+# upstream's version. Without this check such a fix would never be published.
+# Fetched over HTTP so the check stays on the cheap runner (no container).
+# ---------------------------------------------------------------------------
+recipe_drift=false
+if [ -n "${WORKDIR_CHECK:-}" ]; then
+  mkdir -p "$WORKDIR_CHECK"
+  aur_pkgbuild_text="$(curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
+    -H "User-Agent: ${USER_AGENT}" \
+    "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=${AUR_PKGNAME}" 2>/dev/null || true)"
+
+  if [ -n "$aur_pkgbuild_text" ]; then
+    printf '%s\n' "$aur_pkgbuild_text" >"${WORKDIR_CHECK}/aur.PKGBUILD"
+    normalize_pkgbuild_file "${WORKDIR_CHECK}/aur.PKGBUILD" >"${WORKDIR_CHECK}/aur.norm"
+    normalize_pkgbuild_file PKGBUILD >"${WORKDIR_CHECK}/local.norm"
+    if ! diff -q "${WORKDIR_CHECK}/aur.norm" "${WORKDIR_CHECK}/local.norm" >/dev/null 2>&1; then
+      recipe_drift=true
+      log "repo PKGBUILD differs from the AUR copy at ${latest_version}:"
+      diff -u "${WORKDIR_CHECK}/aur.norm" "${WORKDIR_CHECK}/local.norm" >&2 || true
+    fi
+  else
+    log "could not fetch the AUR PKGBUILD; skipping the recipe-drift comparison"
+  fi
+fi
+
 update_needed=false
 reason="already up to date"
 
@@ -162,6 +190,11 @@ if [ "$vs_repo" -gt 0 ]; then
 elif [ "$checksum_changed" = true ]; then
   update_needed=true
   reason="upstream re-uploaded ${latest_version}: checksum ${repo_sha:0:16}… -> ${api_sha:0:16}…"
+elif [ "$recipe_drift" = true ]; then
+  # Same version upstream and here, but the AUR copy of the recipe is stale:
+  # a dependency or script fix has to be published without a version bump.
+  update_needed=true
+  reason="repo PKGBUILD differs from the AUR copy at ${latest_version}"
 elif [ "$vs_aur" -gt 0 ]; then
   # Repo is current but the AUR is behind: re-publish without re-rendering.
   update_needed=true
