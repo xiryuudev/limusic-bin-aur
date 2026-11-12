@@ -37,9 +37,10 @@ Kalau ada langkah yang gagal, job berhenti dan **tidak ada apa pun yang dikirim 
 | Kondisi | Tindakan |
 | --- | --- |
 | Rilis stable baru (mis. `v1.3.0` → `v1.4.0`) | render, build, namcap, push AUR |
-| Versi sama tapi upstream mengganti `.deb` (checksum berubah) | render ulang checksum, push AUR |
+| Versi sama tapi upstream mengganti `.deb` (checksum berubah) | `pkgrel` dinaikkan, checksum diperbarui, push AUR |
 | Repo sudah benar tapi AUR tertinggal satu versi | push ulang tanpa render |
 | Tidak ada perubahan | berhenti setelah job `check` |
+| AUR RPC sedang gangguan | run di-skip (tidak ada build 45 menit); `force=true` tetap bisa dipakai |
 | Upstream menerbitkan tag rc/prerelease | diabaikan (hanya release stable) |
 
 Kasus checksum berubah sengaja ditangani: dulu pernah upstream mengganti isi file untuk versi yang sama dan build gagal karena `sha256sums` usang.
@@ -53,8 +54,10 @@ Set di **Settings → Secrets and variables → Actions**:
 | Nama | Isi |
 | --- | --- |
 | `AUR_SSH_PRIVATE_KEY` | private key SSH yang public key-nya terdaftar di akun AUR. Harus tanpa passphrase. |
-| `AUR_USERNAME` | nama akun AUR (`xiryuu`) |
-| `AUR_EMAIL` | email untuk commit AUR |
+| `AUR_USERNAME` | nama akun AUR (`xiryuu`) — wajib, dipakai sebagai author commit |
+| `AUR_EMAIL` | email untuk commit AUR — wajib, harus sama dengan email akun AUR |
+
+Ketiganya **wajib**: kalau `AUR_USERNAME` atau `AUR_EMAIL` kosong, workflow berhenti sebelum push (AUR mengaitkan commit ke akun lewat email, jadi author yang salah membuat paket tidak ter-update).
 
 `GITHUB_TOKEN` sudah otomatis tersedia dan dipakai untuk commit state + issue; tidak perlu dibuat manual.
 
@@ -82,9 +85,15 @@ Untuk memaksa pipeline penuh (build + namcap, dan push kalau ada perubahan):
 gh workflow run update.yml -f force=true
 ```
 
+`force` melewati keputusan "tidak ada update", tetapi **tetap** melewati semua gate: kalau build atau namcap gagal, AUR tidak disentuh. Kalau AUR ternyata sudah punya versi + checksum yang sama, push di-skip dan hanya commit state yang dijalankan.
+
 ## Frekuensi
 
 GitHub membatasi jadwal minimum **5 menit**, dan pada jam sibuk run terjadwal bisa tertunda beberapa menit. **1 menit tidak didukung** oleh cron GitHub.
+
+Yang perlu diketahui soal biaya: run yang tidak ada update hanya menjalankan job `check` di runner biasa (beberapa detik, tanpa container), jadi `*/5` praktis gratis. Container Arch hanya dinyalakan kalau memang ada yang perlu dibangun.
+
+Karena jadwal GitHub juga dimatikan setelah 60 hari tanpa aktivitas repo, `keepalive.yml` menulis satu commit kecil tiap tanggal 1. Workflow itu memakai concurrency group yang sama dengan update, supaya tidak bertabrakan dengan push state.
 
 Kalau memang butuh ritme ~1 menit, pakai pemicu eksternal yang memanggil `workflow_dispatch`:
 
