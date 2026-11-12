@@ -1,14 +1,18 @@
-# limusic for Arch Linux
+# limusic-bin-prerelease for Arch Linux
 
-Community AUR package for [limusic](https://github.com/SimoHypers/limusic), a
-native YouTube Music client built with Tauri, Rust and SvelteKit.
+Prerelease AUR package for [limusic](https://github.com/SimoHypers/limusic).
+It follows the newest upstream release, rc or final: when a stable release ships,
+this package moves to it too.
 
 ```sh
-paru -S limusic-bin
-# or: yay -S limusic-bin
+paru -S limusic-bin-prerelease
+# or: yay -S limusic-bin-prerelease
 ```
 
 Launch **limusic** from the applications menu, or run `limusic-app`.
+
+Installing this removes `limusic-bin` (and vice versa) — both provide the same
+application files.
 
 Playback goes through libmpv, so a working audio stack is required, plus
 `webkit2gtk-4.1`. YouTube Music login uses your own account.
@@ -18,30 +22,33 @@ Playback goes through libmpv, so a working audio stack is required, plus
 Nothing is pushed to the AUR unless the whole pipeline passes.
 
 ```
-watch.yml        polls upstream every minute for ~6 hours, then chains a new watch
-  └─ update.yml  started as soon as a release appears
-       ├─ check    compare upstream vs PKGBUILD vs AUR (no container)
-       ├─ build    makepkg + namcap in an Arch container; namcap errors block
+watch-prerelease.yml        polls upstream, starts update-prerelease.yml
+  └─ update-prerelease.yml  check → build → validate → publish
+       ├─ check    newest upstream release (rc or final) vs packaged version
+       ├─ build    AppImage extract + makepkg + namcap in an Arch container
        └─ publish  push to the AUR, then re-read the remote to verify
 ```
 
-`watch.yml` is what makes this timely. GitHub's cron schedule routinely fires
-hours late and on some repositories never fires at all, so the watch polls
-upstream itself and starts `update.yml` about a minute after a release.
+Upstream publishes **no `.deb` for prereleases** — only an AppImage — so this
+channel packages the AppImage. The bundled libraries are dropped and the system
+ones are used instead, keeping the package around 40 MB rather than 190 MB.
+
+The workflows live on `main` because GitHub only runs `schedule` on the default
+branch; they check out this branch for the package files.
 
 ## Layout
 
 ```
-.github/workflows/watch.yml     release polling, starts update.yml
-.github/workflows/update.yml    check → build → validate → publish
-scripts/watch.py                polling logic
-scripts/check-update.sh         version, checksum and stale-recipe detection
-scripts/render-pkgbuild.sh      download .deb, verify sha256, write PKGBUILD/.SRCINFO
-scripts/validate.sh             makepkg + namcap gate
-scripts/publish.sh              push to the AUR, then verify
-scripts/commit-state.sh         commit the new PKGBUILD back to main
-scripts/ci-setup.sh             bootstrap the Arch container
-scripts/ci-build.sh             orchestrate render + validate
-scripts/as-builder.sh           run as a non-root user (makepkg refuses root)
-scripts/aur-host-keys.txt       pinned AUR host keys
+PKGBUILD                             AppImage-based recipe
+.github/  (workflows live on main)    watch-prerelease.yml, update-prerelease.yml
+scripts/check-update-prerelease.sh    newest release (rc or final) vs packaged
+scripts/render-pkgbuild-prerelease.sh AppImage download, checksum, tag/pkgver mapping
+scripts/ci-build-prerelease.sh        orchestrate render + validate
+scripts/watch-prerelease.py           release polling
+scripts/validate.sh                   makepkg + namcap gate
+scripts/publish.sh                    push to the AUR, then verify
+scripts/commit-state.sh               commit the new PKGBUILD back here
+scripts/ci-setup.sh                   bootstrap the Arch container
+scripts/as-builder.sh                 run as a non-root user (makepkg refuses root)
+scripts/aur-host-keys.txt             pinned AUR host keys
 ```

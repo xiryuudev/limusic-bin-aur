@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Start update.yml as soon as a new limusic release has its .deb asset.
+"""Start update-prerelease.yml as soon as a newer upstream release exists.
 
-GitHub fires cron schedules hours late -- and for some repositories never fires
-them at all -- so this watch polls upstream for most of a job's 6-hour limit and
-watch.yml then starts the next watch. The schedule only restarts the chain after
-a failure.
+The prerelease channel follows the newest upstream release, rc or final: once a
+final release ships, this package follows it too, so users are never left on an
+older version.
+
+GitHub fires cron schedules hours late and on some repositories never, so this
+watch polls upstream for most of a job's 6-hour limit; watch-prerelease.yml then
+starts the next watch.
 """
 import argparse
 import base64
@@ -16,7 +19,7 @@ import urllib.request
 
 API = "https://api.github.com"
 UPSTREAM = "SimoHypers/limusic"
-WORKFLOW = "update.yml"
+WORKFLOW = "update-prerelease.yml"
 # About half an hour of failed checks in a row: fail the run so it gets noticed.
 MAX_FAILURES = 30
 
@@ -26,7 +29,7 @@ def token():
 
 
 def fetch(url):
-    headers = {"User-Agent": "limusic-bin-aur", "Accept": "application/vnd.github+json"}
+    headers = {"User-Agent": "limusic-bin-prerelease-aur", "Accept": "application/vnd.github+json"}
     if token() and url.startswith(f"{API}/"):
         headers["Authorization"] = f"Bearer {token()}"
     request = urllib.request.Request(url, headers=headers)
@@ -35,18 +38,32 @@ def fetch(url):
 
 
 def version_key(text):
-    """Numeric tuple for a tag or pkgver, or None when it is not plain X.Y.Z."""
-    match = re.fullmatch(r"v?(\d+(?:\.\d+)*)", text.strip())
-    return tuple(map(int, match.group(1).split("."))) if match else None
+    """Sortable key for X.Y.Z and X.Y.Z-rc.N; an rc sorts before its final."""
+    match = re.fullmatch(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-?rc\.?(\d+))?", text.strip(), re.I)
+    if not match:
+        return None
+    major, minor, patch, rc = match.groups()
+    return (
+        int(major),
+        int(minor or 0),
+        int(patch or 0),
+        # a final release outranks any rc of the same X.Y.Z
+        0 if rc is not None else 1,
+        int(rc) if rc else 0,
+    )
 
 
-def latest_release():
-    """/releases/latest skips drafts and prereleases, which is what we track."""
-    return json.loads(fetch(f"{API}/repos/{UPSTREAM}/releases/latest"))
+def newest_release():
+    releases = json.loads(fetch(f"{API}/repos/{UPSTREAM}/releases?per_page=100"))
+    versioned = [r for r in releases
+                 if not r.get("draft") and version_key(r["tag_name"]) is not None]
+    if not versioned:
+        raise ValueError("no versioned upstream releases found")
+    return max(versioned, key=lambda r: version_key(r["tag_name"]))
 
 
 def packaged_pkgver(repo):
-    content = json.loads(fetch(f"{API}/repos/{repo}/contents/PKGBUILD?ref=main"))
+    content = json.loads(fetch(f"{API}/repos/{repo}/contents/PKGBUILD?ref=prerelease"))
     text = base64.b64decode(content["content"]).decode()
     match = re.search(r"^pkgver=(\S+)", text, re.M)
     if not match:
@@ -54,18 +71,18 @@ def packaged_pkgver(repo):
     return match.group(1).strip("\"'")
 
 
-def deb_asset(release, version):
-    """The asset update.yml needs; a release can exist before its asset is up."""
-    name = f"limusic_{version}_amd64.deb"
-    return next((a for a in release.get("assets", []) if a["name"] == name), None)
+def asset_present(release, version):
+    """Every release ships an AppImage, rc and final alike."""
+    name = f"limusic_{version}_amd64.AppImage"
+    return any(a["name"] == name for a in release.get("assets", []))
 
 
 def dispatch(repo):
     request = urllib.request.Request(
         f"{API}/repos/{repo}/actions/workflows/{WORKFLOW}/dispatches",
-        data=json.dumps({"ref": "main"}).encode(), method="POST",
+        data=json.dumps({"ref": "prerelease"}).encode(), method="POST",
         headers={
-            "User-Agent": "limusic-bin-aur",
+            "User-Agent": "limusic-bin-prerelease-aur",
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {token()}",
         })
@@ -76,29 +93,30 @@ def dispatch(repo):
 class Watch:
     def __init__(self, repo):
         self.repo = repo
-        self.packaged = None  # newest tag the package already tracks
-        self.started = set()  # tags this watch already handed to update.yml
+        self.packaged = None  # newest tag already known to be packaged
+        self.started = set()  # tags this watch already handed to update
 
     def poll(self):
-        release = latest_release()
+        release = newest_release()
         tag = release["tag_name"]
         if tag == self.packaged or tag in self.started:
             return
 
-        incoming, known = version_key(tag), version_key(packaged_pkgver(self.repo))
+        incoming = version_key(tag)
+        known = version_key(packaged_pkgver(self.repo))
         if incoming is not None and known is not None and incoming <= known:
             # Already packaged (or the package is ahead): nothing to start.
             self.packaged = tag
             return
 
         version = tag.lstrip("v")
-        if deb_asset(release, version) is None:
-            # update.yml would fail on a missing source; wait for the upload.
-            print(f"{tag} is published, waiting for limusic_{version}_amd64.deb", flush=True)
+        if not asset_present(release, version):
+            # update would fail without the source; wait for the upload.
+            print(f"{tag} is published, waiting for limusic_{version}_amd64.AppImage", flush=True)
             return
 
-        # Once per tag: a failed build is retried by the next watch or by
-        # update.yml's own schedule.
+        # Once per tag: a failed build is retried by the next watch or by the
+        # update workflow's own schedule.
         dispatch(self.repo)
         self.started.add(tag)
         print(f"Started {WORKFLOW} for {tag}", flush=True)
