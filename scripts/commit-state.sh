@@ -24,6 +24,10 @@ source "${SCRIPT_DIR}/lib.sh"
 
 version="${1:-}"
 aur_commit="${2:-}"
+if [ -z "$version" ]; then
+  # A push-triggered run has no check job to supply the version.
+  version="$(pkgbuild_var PKGBUILD pkgver 2>/dev/null || true)"
+fi
 [ -n "$version" ] || die "usage: commit-state.sh <version> [aur-commit-sha]"
 
 [ -f PKGBUILD ] || die "PKGBUILD missing"

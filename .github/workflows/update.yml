@@ -162,18 +162,30 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           VERSION: ${{ needs.check.outputs.version }}
           REASON: ${{ needs.check.outputs.reason }}
+          PUBLISHED: ${{ needs.publish.outputs.published }}
+          PUSH_REASON: ${{ needs.publish.outputs.push_reason }}
         run: |
           set -euo pipefail
           title='limusic-bin automation failed'
           api="https://api.github.com/repos/${REPO}"
+
+          # Say what really happened: a failure after a successful AUR push (for
+          # example the mirror commit) must not claim the AUR was left untouched.
+          if [ "${PUBLISHED:-}" = "true" ]; then
+            aur_note="The AUR **was** updated before this failure — the remaining problem is in a later step (see the run log)."
+          elif [ -n "${PUSH_REASON:-}" ]; then
+            aur_note="The AUR was not changed (publish outcome: ${PUSH_REASON})."
+          else
+            aur_note="The AUR was **not** modified by this run."
+          fi
 
           existing="$(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "${api}/issues?state=open&labels=automation&per_page=100" \
             | jq -r --arg t "$title" '[.[] | select(.title == $t)] | first | .number // empty')"
 
-          body="$(printf 'Workflow run failed: %s\n\n- upstream version: `%s`\n- check reason: %s\n\nThe AUR was **not** modified by this run.\n' \
-            "$RUN_URL" "${VERSION:-unknown}" "${REASON:-unknown}")"
+          body="$(printf 'Workflow run failed: %s\n\n- upstream version: `%s`\n- check reason: %s\n- publish outcome: %s\n\n%s\n' \
+            "$RUN_URL" "${VERSION:-unknown}" "${REASON:-unknown}" "${PUSH_REASON:-n/a}" "$aur_note")"
 
           if [ -n "$existing" ]; then
             curl -fsS -X POST -H "Authorization: Bearer ${GH_TOKEN}" \
