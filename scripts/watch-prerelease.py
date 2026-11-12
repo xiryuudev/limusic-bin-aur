@@ -80,7 +80,7 @@ def asset_present(release, version):
 def dispatch(repo):
     request = urllib.request.Request(
         f"{API}/repos/{repo}/actions/workflows/{WORKFLOW}/dispatches",
-        data=json.dumps({"ref": "prerelease"}).encode(), method="POST",
+        data=json.dumps({"ref": os.environ.get("DISPATCH_REF", "main")}).encode(), method="POST",
         headers={
             "User-Agent": "limusic-bin-prerelease-aur",
             "Accept": "application/vnd.github+json",

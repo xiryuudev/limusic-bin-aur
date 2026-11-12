@@ -1,0 +1,176 @@
+name: Update and publish prerelease AUR package
+
+# Tracks the NEWEST upstream release (rc or final) into limusic-bin-prerelease.
+# Upstream publishes no .deb for prereleases, only an AppImage, so this channel
+# packages the AppImage.
+#
+# Nothing is pushed to the AUR unless build, namcap and remote verification all
+# pass. Driven by watch-prerelease.yml, which reacts within about a minute of a
+# release; the schedule is only a fallback.
+#
+# This file lives on main because GitHub runs `schedule` only on the default
+# branch; the package files live on the prerelease branch and are checked out
+# explicitly.
+
+on:
+  schedule:
+    - cron: '11,41 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild and publish even when the package is current
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: limusic-bin-prerelease-maintenance
+  cancel-in-progress: false
+
+env:
+  AUR_PKGNAME: limusic-bin-prerelease
+  UPSTREAM_REPO: SimoHypers/limusic
+  PACKAGE_BRANCH: prerelease
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      update_needed: ${{ steps.check.outputs.update_needed }}
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+      pkgver: ${{ steps.check.outputs.pkgver }}
+      asset_url: ${{ steps.check.outputs.asset_url }}
+      asset_digest: ${{ steps.check.outputs.asset_digest }}
+      reason: ${{ steps.check.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PACKAGE_BRANCH }}
+          persist-credentials: false
+
+      - name: Compare the newest upstream release with the package
+        id: check
+        run: ./scripts/check-update-prerelease.sh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    needs: check
+    if: >-
+      !cancelled() && needs.check.result == 'success' &&
+      (needs.check.outputs.update_needed == 'true' || inputs.force == true)
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    outputs:
+      published: ${{ steps.publish.outputs.published }}
+      push_reason: ${{ steps.publish.outputs.push_reason }}
+      commit_sha: ${{ steps.publish.outputs.commit_sha }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The base-devel image ships neither git nor ssh; a full sysupgrade is
+      # required because `pacman -Sy <pkg>` alone is the partial-upgrade pattern
+      # Arch forbids and can install a git built for a newer glibc than the image.
+      - name: Bootstrap git and ssh
+        run: pacman -Syu --noconfirm --needed git openssh >/dev/null
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PACKAGE_BRANCH }}
+
+      - name: Set up clean Arch container
+        run: bash scripts/ci-setup.sh
+
+      - name: Render PKGBUILD, build, run namcap
+        run: >-
+          ./scripts/as-builder.sh ./scripts/ci-build-prerelease.sh
+          "${TAG}" "${ASSET_URL}"
+        env:
+          SRC_DIR: ${{ github.workspace }}
+          EXPECTED_DIGEST: ${{ needs.check.outputs.asset_digest }}
+          TAG: ${{ needs.check.outputs.tag }}
+          ASSET_URL: ${{ needs.check.outputs.asset_url }}
+
+      - name: Show resulting PKGBUILD
+        run: |
+          sed -n '1,40p' PKGBUILD
+          echo '--- .SRCINFO ---'
+          sed -n '1,40p' .SRCINFO
+
+      - name: Publish to AUR
+        id: publish
+        run: ./scripts/publish.sh "${VERSION}"
+        env:
+          VERSION: ${{ needs.check.outputs.pkgver }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
+          AUR_EMAIL: ${{ secrets.AUR_EMAIL }}
+          WORKDIR: ${{ runner.temp }}/aur-publish
+
+      - name: Commit new state to the prerelease branch
+        if: steps.publish.outputs.published == 'true' || steps.publish.outputs.push_reason == 'AUR already up to date'
+        run: ./scripts/commit-state.sh "${VERSION}" "${{ steps.publish.outputs.commit_sha }}"
+        env:
+          VERSION: ${{ needs.check.outputs.pkgver }}
+          WORKDIR: ${{ runner.temp }}/aur-state
+          TARGET_BRANCH: ${{ env.PACKAGE_BRANCH }}
+
+  notify-failure:
+    needs: [check, publish]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update a failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          VERSION: ${{ needs.check.outputs.pkgver }}
+          REASON: ${{ needs.check.outputs.reason }}
+          PUBLISHED: ${{ needs.publish.outputs.published }}
+          PUSH_REASON: ${{ needs.publish.outputs.push_reason }}
+        run: |
+          set -euo pipefail
+          title='limusic-bin-prerelease automation failed'
+          api="https://api.github.com/repos/${REPO}"
+
+          if [ "${PUBLISHED:-}" = "true" ]; then
+            aur_note="The AUR **was** updated before this failure — the remaining problem is in a later step (see the run log)."
+          elif [ -n "${PUSH_REASON:-}" ]; then
+            aur_note="The AUR was not changed (publish outcome: ${PUSH_REASON})."
+          else
+            aur_note="The AUR was **not** modified by this run."
+          fi
+
+          existing="$(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${api}/issues?state=open&labels=automation&per_page=100" \
+            | jq -r --arg t "$title" '[.[] | select(.title == $t)] | first | .number // empty')"
+
+          body="$(printf 'Workflow run failed: %s\n\n- version: `%s`\n- check reason: %s\n- publish outcome: %s\n\n%s\n' \
+            "$RUN_URL" "${VERSION:-unknown}" "${REASON:-unknown}" "${PUSH_REASON:-n/a}" "$aur_note")"
+
+          if [ -n "$existing" ]; then
+            curl -fsS -X POST -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${api}/issues/${existing}/comments" \
+              -d "$(jq -n --arg b "$body" '{body:$b}')" >/dev/null
+            echo "commented on issue #${existing}"
+          else
+            curl -fsS -X POST -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${api}/issues" \
+              -d "$(jq -n --arg t "$title" --arg b "$body" \
+                    '{title:$t, body:$b, labels:["automation"]}')" >/dev/null
+            echo "opened issue: ${title}"
+          fi
