@@ -1,82 +1,84 @@
-# limusic untuk Arch Linux
+# limusic for Arch Linux
 
-Paket AUR komunitas untuk [limusic](https://github.com/SimoHypers/limusic).
+Community AUR package for [limusic](https://github.com/SimoHypers/limusic), a
+native YouTube Music client built with Tauri, Rust and SvelteKit.
 
 ```sh
 paru -S limusic-bin
-# atau: yay -S limusic-bin
+# or: yay -S limusic-bin
 ```
 
-Jalankan **limusic** dari menu aplikasi atau ketik `limusic-app`.
+Launch **limusic** from the applications menu, or run `limusic-app`.
 
-Butuh driver audio yang berfungsi (libmpv) dan `webkit2gtk-4.1`. Login YouTube
-Music memakai akunmu sendiri.
+Playback goes through libmpv, so a working audio stack is required, plus
+`webkit2gtk-4.1`. YouTube Music login uses your own account.
 
-## Cara update-nya bekerja
+## How updates work
 
-Tidak ada yang di-push ke AUR kalau ada yang gagal.
+Nothing is pushed to the AUR unless the whole pipeline passes.
 
 ```
-watch.yml        cek rilis upstream tiap 1 menit, hidup ~6 jam lalu menyambung
-  └─ update.yml  dipanggil begitu ada rilis baru
-       ├─ check    bandingkan upstream vs PKGBUILD vs AUR (tanpa container)
-       ├─ build    makepkg + namcap di container Arch; error memblokir
-       └─ publish  push ke AUR, lalu verifikasi ulang isi remote
+watch.yml        polls upstream every minute for ~6 hours, then chains a new watch
+  └─ update.yml  started as soon as a release appears
+       ├─ check    compare upstream vs PKGBUILD vs AUR (no container)
+       ├─ build    makepkg + namcap in an Arch container; namcap errors block
+       └─ publish  push to the AUR, then re-read the remote to verify
 ```
 
-`watch.yml` yang membuat update cepat: jadwal cron GitHub sering telat berjam-jam
-(dan di sebagian repo tidak pernah jalan), jadi watch melakukan polling sendiri
-dan menyalakan `update.yml` dalam ~1 menit setelah rilis.
+`watch.yml` is what makes this timely. GitHub's cron schedule routinely fires
+hours late and on some repositories never fires at all, so the watch polls
+upstream itself and starts `update.yml` about a minute after a release.
 
-## Sekali setup
+## One-time setup
 
-Set di **Settings → Secrets and variables → Actions**:
+Add these under **Settings → Secrets and variables → Actions**:
 
-| Secret | Isi |
+| Secret | Value |
 | --- | --- |
-| `AUR_SSH_PRIVATE_KEY` | private key SSH yang terdaftar di akun AUR (tanpa passphrase) |
-| `AUR_USERNAME` | nama akun AUR |
-| `AUR_EMAIL` | email akun AUR — author commit harus cocok |
+| `AUR_SSH_PRIVATE_KEY` | SSH private key registered on your AUR account (no passphrase) |
+| `AUR_USERNAME` | your AUR account name |
+| `AUR_EMAIL` | your AUR account email — the commit author must match |
 
-Ketiganya wajib. Kalau author tidak cocok dengan akun AUR, paket tidak ter-update
-walau push-nya berhasil.
+All three are required. If the commit author does not match the AUR account, the
+push succeeds but the package does not update.
 
-Key salah akan ditolak dengan pesan jelas. Fingerprint key yang dipakai
-dicetak di log — cocokkan dengan yang ada di akun AUR.
+A bad key is rejected with a clear message, and the fingerprint of the key
+actually used is printed in the log so you can compare it with the one on your
+AUR account.
 
-## Menjalankan lokal
+## Running locally
 
-Butuh Arch (atau turunannya) dengan `base-devel`, `namcap`, `jq`.
+Needs Arch (or a derivative) with `base-devel`, `namcap` and `jq`.
 
 ```sh
-./scripts/check-update.sh        # cek versi saja, tidak mengubah file
-./scripts/local-test.sh          # build + namcap untuk PKGBUILD saat ini
-./scripts/local-test.sh 1.4.0    # paksa versi 1.4.0 (menulis ulang PKGBUILD)
+./scripts/check-update.sh        # report versions only, changes nothing
+./scripts/local-test.sh          # build + namcap for the current PKGBUILD
+./scripts/local-test.sh 1.4.0    # force version 1.4.0 (rewrites PKGBUILD)
 ```
 
-## Struktur
+## Layout
 
 ```
-.github/workflows/watch.yml     polling rilis, menyalakan update.yml
+.github/workflows/watch.yml     release polling, starts update.yml
 .github/workflows/update.yml    check → build → validate → publish
-scripts/watch.py                logika polling
-scripts/check-update.sh         deteksi versi, checksum, dan resep tertinggal
-scripts/render-pkgbuild.sh      unduh .deb, verifikasi sha256, tulis PKGBUILD/.SRCINFO
+scripts/watch.py                polling logic
+scripts/check-update.sh         version, checksum and stale-recipe detection
+scripts/render-pkgbuild.sh      download .deb, verify sha256, write PKGBUILD/.SRCINFO
 scripts/validate.sh             makepkg + namcap gate
-scripts/publish.sh              push ke AUR, lalu verifikasi
-scripts/commit-state.sh         commit PKGBUILD baru ke main
-scripts/ci-setup.sh             bootstrap container Arch
-scripts/ci-build.sh             orkestrasi render + validate
-scripts/as-builder.sh           jalankan sebagai user non-root (makepkg menolak root)
-scripts/aur-host-keys.txt       host key AUR yang di-pin
+scripts/publish.sh              push to the AUR, then verify
+scripts/commit-state.sh         commit the new PKGBUILD back to main
+scripts/ci-setup.sh             bootstrap the Arch container
+scripts/ci-build.sh             orchestrate render + validate
+scripts/as-builder.sh           run as a non-root user (makepkg refuses root)
+scripts/aur-host-keys.txt       pinned AUR host keys
 ```
 
-## Catatan
+## Notes
 
-- `namcap` **E:** memblokir push; **W:** hanya dicetak di log.
-- `pkgrel` dinaikkan saat upstream mengganti file untuk versi yang sama, supaya
-  user benar-benar rebuild.
-- Host key AUR di-pin; kalau AUR mengganti key, push gagal dan
-  `scripts/aur-host-keys.txt` perlu diperbarui.
-- `keepalive.yml` menulis `.github/heartbeat` tiap tanggal 1 supaya jadwal tidak
-  dimatikan GitHub setelah 60 hari tanpa aktivitas.
+- namcap **E:** findings block the push; **W:** findings are only logged.
+- `pkgrel` is bumped when upstream re-uploads a file for the same version, so
+  users actually rebuild.
+- AUR host keys are pinned; if AUR rotates them the push fails and
+  `scripts/aur-host-keys.txt` must be updated.
+- `keepalive.yml` writes `.github/heartbeat` on the 1st of each month so GitHub
+  does not disable the schedule after 60 days without activity.
