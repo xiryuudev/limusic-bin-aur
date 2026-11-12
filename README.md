@@ -89,24 +89,25 @@ gh workflow run update.yml -f force=true
 
 ## Frekuensi
 
-GitHub membatasi jadwal minimum **5 menit**, dan pada jam sibuk run terjadwal bisa tertunda beberapa menit. **1 menit tidak didukung** oleh cron GitHub.
+GitHub membatasi jadwal minimum **5 menit**, dan **1 menit tidak didukung** cron GitHub.
 
-Yang perlu diketahui soal biaya: run yang tidak ada update hanya menjalankan job `check` di runner biasa (beberapa detik, tanpa container), jadi `*/5` praktis gratis. Container Arch hanya dinyalakan kalau memang ada yang perlu dibangun.
+Yang penting dan sering bikin bingung: penjadwal GitHub itu **best-effort**, bukan jam weker. Dokumentasi resminya menyebut run terjadwal *bisa tertunda* saat beban tinggi dan **bisa di-drop sepenuhnya tanpa notifikasi**. Beban paling padat tepat di awal jam, jadi cron yang menempel di `:00, :05, :10, ...` paling sering kena. Karena itu jadwal di repo ini digeser ke `2-59/5` (menit 2, 7, 12, ... 57) — tetap tiap 5 menit, tapi tidak berebut di jam sibuk.
 
-Karena jadwal GitHub juga dimatikan setelah 60 hari tanpa aktivitas repo, `keepalive.yml` menulis satu commit kecil tiap tanggal 1. Workflow itu memakai concurrency group yang sama dengan update, supaya tidak bertabrakan dengan push state.
-
-Kalau memang butuh ritme ~1 menit, pakai pemicu eksternal yang memanggil `workflow_dispatch`:
+Walau begitu, jadwal GitHub **tidak bisa diandalkan untuk ritme ketat**. Kalau kamu butuh kepastian, pemicu eksternal adalah satu-satunya cara: `scripts/trigger-workflow.sh` memanggil `workflow_dispatch` dan bisa dijalankan dari cron mana pun (cron-job.org, systemd timer, atau mesin yang sudah menyala).
 
 ```bash
-# isi PAT dengan scope `Actions: write` pada repo ini
-curl -sS -X POST \
-  -H "Authorization: Bearer $PAT" \
-  -H "Accept: application/vnd.github+json" \
-  https://api.github.com/repos/xiryuudev/limusic-bin-aur/actions/workflows/update.yml/dispatches \
-  -d '{"ref":"main"}'
+# butuh token dengan izin "Actions: write" pada repo ini
+GH_PAT=github_pat_xxx ./scripts/trigger-workflow.sh
+
+# tiap 1 menit lewat crontab:
+* * * * * GH_PAT=github_pat_xxx /path/ke/trigger-workflow.sh >/dev/null 2>&1
 ```
 
-Panggil dari cron-job.org (interval 1 menit, gratis) atau systemd timer di mesin sendiri. Perlu diketahui: GitHub tetap mengantrekan run, jadi burst 1 menit tidak dijamin dieksekusi tiap 1 menit, dan `concurrency` akan menahan run yang bertumpuk. Karena sebagian besar run berhenti di job `check` (beberapa detik, tanpa container), biayanya kecil.
+Dispatch hanya menyalakan job `check` yang murah (beberapa detik). Container Arch tetap hanya hidup kalau ada yang perlu dibangun, dan `concurrency` menahan run yang bertumpuk supaya tidak dobel.
+
+Biaya: run tanpa update tidak memakai container sama sekali, jadi cek tiap 5 menit praktis gratis.
+
+Karena jadwal GitHub juga dimatikan setelah 60 hari tanpa aktivitas repo, `keepalive.yml` menulis satu commit kecil tiap tanggal 1. Workflow itu memakai concurrency group yang sama dengan update, supaya tidak bertabrakan dengan push state.
 
 ## Menjalankan lokal
 
@@ -126,7 +127,7 @@ DRY_RUN=true ./scripts/local-test.sh 1.4.0   # berhenti sebelum push AUR
 ```
 .github/workflows/update.yml    jadwal + pipeline build/validate/publish
 .github/workflows/keepalive.yml heartbeat bulanan agar jadwal tidak dimatikan GitHub
-scripts/check-update.sh         deteksi versi & checksum
+scripts/check-update.sh         deteksi versi, checksum, dan resep yang tertinggal
 scripts/render-pkgbuild.sh      unduh .deb + tulis PKGBUILD/.SRCINFO
 scripts/validate.sh             build + namcap gate
 scripts/publish.sh              commit & push ke AUR, lalu verifikasi
@@ -134,6 +135,7 @@ scripts/commit-state.sh         commit PKGBUILD baru ke branch main
 scripts/ci-setup.sh             bootstrap container Arch
 scripts/ci-build.sh             orkestrasi render + validate
 scripts/as-builder.sh           jalankan sebagai user non-root (makepkg menolak root)
+scripts/trigger-workflow.sh     pemicu manual/eksternal (workflow_dispatch)
 scripts/aur-host-keys.txt       host key AUR yang di-pin
 ```
 

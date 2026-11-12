@@ -11,7 +11,12 @@ name: limusic-bin AUR update
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    # Offset from the top of the hour on purpose: GitHub runs scheduled
+    # workflows on a best-effort queue, and `*/5` piles every run onto :00, :05,
+    # :10 ... which is exactly when the queue is most congested (delays of
+    # 5-30 min, and runs can be dropped outright). Minutes 2,7,12,...57 sit
+    # outside that rush. Still every 5 minutes, GitHub's documented minimum.
+    - cron: '2-59/5 * * * *'
   workflow_dispatch:
     inputs:
       force:
