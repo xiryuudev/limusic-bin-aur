@@ -92,10 +92,15 @@ require_cmd namcap
 run_namcap() { # target
   local target="$1" out
   out="$(namcap "$target" 2>&1)" || true
-  if printf '%s\n' "$out" | grep -qE '^Error: '; then
-    printf '%s\n' "$out" >&2
-    die "namcap could not analyse ${target}"
-  fi
+  # Match against a variable, not a pipe: `printf ... | grep -q` can SIGPIPE the
+  # producer and pipefail would then report "no error" exactly when namcap's
+  # output is large.
+  case "$out" in
+    *"Error: "*)
+      printf '%s\n' "$out" >&2
+      die "namcap could not analyse ${target}"
+      ;;
+  esac
   printf '%s\n' "$out"
 }
 

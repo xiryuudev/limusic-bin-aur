@@ -85,13 +85,17 @@ else
     new_rel="${previous_rel:-1}"
     rel_reason="no payload change"
   else
-    new_rel=$(( ${previous_rel:-1} + 1 ))
+    new_rel=$(( ${previous_rel:-0} + 1 ))
     rel_reason="payload changed for the same version"
   fi
 fi
 
 sed -i -E "s|^pkgrel=.*$|pkgrel=${new_rel}|" PKGBUILD
-log "pkgrel ${previous_rel:-?} -> ${new_rel} (${rel_reason})"
+if ! grep -qE '^pkgrel=' PKGBUILD; then
+  # A PKGBUILD without pkgrel is invalid; add it right after pkgver.
+  sed -i -E "/^pkgver=.*\$/a pkgrel=${new_rel}" PKGBUILD
+fi
+log "pkgrel ${previous_rel:-<unset>} -> ${new_rel} (${rel_reason})"
 
 # ---------------------------------------------------------------------------
 # 3. Regenerate .SRCINFO from the PKGBUILD (never hand-edited).

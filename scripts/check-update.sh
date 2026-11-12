@@ -56,13 +56,17 @@ deb_api_digest="$(jq -r '.digest // empty' <<<"$deb_json")"
 # ---------------------------------------------------------------------------
 # What the AUR currently serves. A failed RPC must NOT be read as "AUR is at 0":
 # that would schedule a full 45-minute rebuild every 5 minutes for the whole
-# outage. Only a successful response may move this decision.
+# outage. Only a successful response may move this decision, so "RPC failed" and
+# "package genuinely absent" are tracked separately.
 # ---------------------------------------------------------------------------
 aur_version=""
+rpc_ok=false
+
 aur_raw="$(curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
   "https://aur.archlinux.org/rpc/v5/info?arg[]=${AUR_PKGNAME}" 2>/dev/null || true)"
 
 if [ -n "$aur_raw" ] && printf '%s' "$aur_raw" | jq -e '.type == "multiinfo"' >/dev/null 2>&1; then
+  rpc_ok=true
   aur_resultcount="$(printf '%s' "$aur_raw" | jq -r '.resultcount // 0')"
   if [ "$aur_resultcount" -gt 0 ]; then
     aur_full="$(printf '%s' "$aur_raw" | jq -r '.results[0].Version // empty')"
@@ -72,10 +76,22 @@ if [ -n "$aur_raw" ] && printf '%s' "$aur_raw" | jq -e '.type == "multiinfo"' >/
   fi
 fi
 
+if [ "$rpc_ok" = false ]; then
+  # Without the AUR's current version there is no way to know whether work is
+  # needed. Refusing to schedule is the safe answer: the next run retries.
+  annotate warning "AUR RPC unavailable; skipping this run instead of assuming the AUR is behind"
+  set_output update_needed false
+  set_output version ""
+  set_output reason "AUR RPC unavailable (transient); run skipped"
+  summary "### limusic-bin update check"
+  summary ""
+  summary "AUR RPC did not answer — no work scheduled. The next scheduled run will retry."
+  exit 0
+fi
+
 if [ -z "$aur_version" ]; then
-  # Either the package is not on the AUR yet, or the RPC did not answer. Pushing
-  # is still safe (publish.sh re-reads the real AUR checkout), but say so.
-  warn "could not determine the AUR version (RPC unavailable or package absent); assuming out of date"
+  # RPC answered and the package is not on the AUR yet: a publish is wanted.
+  log "AUR reports no such package — treating as not yet published"
   aur_version="0"
 fi
 

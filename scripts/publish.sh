@@ -54,23 +54,27 @@ log "files consistent: pkgver=${version} sha256=${local_sha:0:16}..."
 # ---------------------------------------------------------------------------
 aur_remote="${AUR_REMOTE:-ssh://aur@aur.archlinux.org/${AUR_PKGNAME}.git}"
 
+# Decide once whether this is the real AUR endpoint; both the identity check and
+# the SSH-key setup below must agree, so SCP-style remotes cannot slip through.
+is_real_aur=false
+case "$aur_remote" in
+  ssh://*aur.archlinux.org*|*@aur.archlinux.org:*) is_real_aur=true ;;
+esac
+
 # AUR attributes a push to the account owning the SSH key, and the commit author
 # must match it or the package will not update. Both values are secrets.
 git_name="${AUR_USERNAME:-}"
 git_email="${AUR_EMAIL:-}"
-case "$aur_remote" in
-  ssh://*aur.archlinux.org*)
-    [ -n "$git_name" ] || die "AUR_USERNAME is not set (required for the AUR commit author)"
-    [ -n "$git_email" ] || die "AUR_EMAIL is not set (required for the AUR commit author)"
-    ;;
-  *)
-    # Rehearsing against a local repository: fall back to a placeholder identity.
-    git_name="${git_name:-xiryuu}"
-    git_email="${git_email:-farrel2008ganteng@protonmail.com}"
-    ;;
-esac
+if [ "$is_real_aur" = true ]; then
+  [ -n "$git_name" ] || die "AUR_USERNAME is not set (required for the AUR commit author)"
+  [ -n "$git_email" ] || die "AUR_EMAIL is not set (required for the AUR commit author)"
+else
+  # Rehearsing against a local repository: fall back to a placeholder identity.
+  git_name="${git_name:-xiryuu}"
+  git_email="${git_email:-farrel2008ganteng@protonmail.com}"
+fi
 
-# SSH material is only needed for the real AUR endpoint. AUR_REMOTE lets the
+# SSH material is only needed for a real SSH endpoint. AUR_REMOTE lets the
 # pipeline be rehearsed against a throwaway local repository.
 case "$aur_remote" in
   ssh://*|*@*:*)
