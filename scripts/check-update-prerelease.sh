@@ -20,6 +20,7 @@ source "${SCRIPT_DIR}/lib.sh"
 : "${AUR_PKGNAME:=limusic-bin-prerelease}"
 : "${GITHUB_API:=https://api.github.com}"
 : "${USER_AGENT:=limusic-bin-prerelease-automation}"
+: "${WORKDIR_CHECK:=${RUNNER_TEMP:-/tmp}/limusic-prerelease-check}"
 
 require_cmd curl jq python3
 
@@ -109,6 +110,43 @@ is_prerelease="$(printf '%s' "$release_json" | jq -r '.prerelease')"
 # ---------------------------------------------------------------------------
 current_key="$(version_key "$repo_pkgver")" || die "cannot parse pkgver ${repo_pkgver}"
 
+# ---------------------------------------------------------------------------
+# Recipe drift: the repo's PKGBUILD can be correct while the AUR's copy is stale
+# at the same pkgver — adding a provides/conflicts or fixing a dependency does
+# not change upstream's version, so version comparison alone would never publish
+# it. The AUR git repository is authoritative and reflects a push immediately;
+# its cgit view is not used because it lags by minutes and produced false drift.
+# ---------------------------------------------------------------------------
+aur_git_pkgbuild() {
+  local dir="${WORKDIR_CHECK}/aur-git"
+  rm -rf "$dir"
+  if command -v git >/dev/null 2>&1; then
+    if GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --filter=blob:none --no-checkout \
+      "https://aur.archlinux.org/${AUR_PKGNAME}.git" "$dir" >/dev/null 2>&1; then
+      git -C "$dir" show HEAD:PKGBUILD 2>/dev/null && return 0
+    fi
+  fi
+  curl -fsSL --retry 2 --max-time 30 -H "User-Agent: ${USER_AGENT}" \
+    "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=${AUR_PKGNAME}" 2>/dev/null
+}
+
+recipe_drift=false
+mkdir -p "${WORKDIR_CHECK}"
+aur_pkgbuild_text="$(aur_git_pkgbuild 2>/dev/null || true)"
+
+if [ -n "$aur_pkgbuild_text" ]; then
+  printf '%s\n' "$aur_pkgbuild_text" >"${WORKDIR_CHECK}/aur.PKGBUILD"
+  normalize_pkgbuild_file "${WORKDIR_CHECK}/aur.PKGBUILD" >"${WORKDIR_CHECK}/aur.norm"
+  normalize_pkgbuild_file PKGBUILD >"${WORKDIR_CHECK}/local.norm"
+  if ! diff -q "${WORKDIR_CHECK}/aur.norm" "${WORKDIR_CHECK}/local.norm" >/dev/null 2>&1; then
+    recipe_drift=true
+    log "repo PKGBUILD differs from the AUR git copy:"
+    diff -u "${WORKDIR_CHECK}/aur.norm" "${WORKDIR_CHECK}/local.norm" >&2 || true
+  fi
+else
+  log "AUR git copy unavailable; skipping the recipe-drift comparison"
+fi
+
 update_needed=false
 reason="already up to date"
 
@@ -119,6 +157,9 @@ elif [ "$latest_tag" != "v${repo_tag}" ] && [ "$pkgver_new" = "$repo_pkgver" ]; 
   # Same version, re-tagged or re-uploaded: rebuild so the checksum matches.
   update_needed=true
   reason="upstream ${latest_tag} republished the payload for ${repo_pkgver}"
+elif [ "$recipe_drift" = true ]; then
+  update_needed=true
+  reason="PKGBUILD differs from the AUR copy at ${repo_pkgver} (recipe-only change)"
 elif [[ "$newest_key" < "$current_key" ]]; then
   reason="packaged ${repo_pkgver} is ahead of upstream ${latest_tag}"
 fi
