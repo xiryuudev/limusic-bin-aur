@@ -5,3 +5,4 @@
 *.deb
 src/
 pkg/
+__pycache__/

@@ -27,6 +27,11 @@ source "${SCRIPT_DIR}/lib.sh"
 : "${DRY_RUN:=false}"
 
 version="${1:-}"
+if [ -z "$version" ]; then
+  # A push-triggered run has no check job to supply the version; the PKGBUILD
+  # already carries the version that was validated.
+  version="$(pkgbuild_var PKGBUILD pkgver 2>/dev/null || true)"
+fi
 [ -n "$version" ] || die "usage: publish.sh <version>"
 
 require_cmd git ssh
