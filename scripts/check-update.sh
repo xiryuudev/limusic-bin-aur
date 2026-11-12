@@ -78,14 +78,27 @@ fi
 
 if [ "$rpc_ok" = false ]; then
   # Without the AUR's current version there is no way to know whether work is
-  # needed. Refusing to schedule is the safe answer: the next run retries.
-  annotate warning "AUR RPC unavailable; skipping this run instead of assuming the AUR is behind"
+  # needed, so the scheduled path does nothing and the next run retries.
+  #
+  # The upstream facts are already resolved above (version, deb URL, digest), so
+  # they are still published: a manual `force` dispatch must keep working during
+  # an AUR blip, and it cannot loop because it is never triggered by the cron.
+  annotate warning "AUR RPC unavailable; skipping this run (use force=true to rebuild anyway)"
   set_output update_needed false
-  set_output version ""
+  set_output version "$latest_version"
+  set_output release_tag "$release_tag"
+  set_output deb_url "$deb_url"
+  set_output deb_name "$deb_name"
+  set_output deb_api_digest "$deb_api_digest"
+  set_output repo_pkgver "$repo_pkgver"
+  set_output aur_version "unknown"
+  set_output checksum_changed false
   set_output reason "AUR RPC unavailable (transient); run skipped"
   summary "### limusic-bin update check"
   summary ""
-  summary "AUR RPC did not answer — no work scheduled. The next scheduled run will retry."
+  summary "AUR RPC did not answer, so the AUR state is unknown — no work scheduled."
+  summary "Upstream latest is \`${latest_version}\`; the next scheduled run will retry."
+  summary "To rebuild anyway: \`gh workflow run update.yml -f force=true\`"
   exit 0
 fi
 

@@ -14,8 +14,11 @@ on:
 permissions:
   contents: write
 
+# Share the update workflow's concurrency group so a heartbeat can never land on
+# main between the update job's fetch and its push (that push is not rebased, by
+# design, so a concurrent commit would make it non-fast-forward).
 concurrency:
-  group: limusic-bin-aur-keepalive
+  group: limusic-bin-aur-update
   cancel-in-progress: false
 
 jobs:
