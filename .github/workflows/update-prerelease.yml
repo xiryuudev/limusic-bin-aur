@@ -13,6 +13,13 @@ name: Update and publish prerelease AUR package
 # explicitly below.
 
 on:
+  # Changing this workflow is itself the validation trigger: the push runs the
+  # full check → build → namcap → publish path. Limited to this file so ordinary
+  # pushes to main do not spend a 60-minute container on the prerelease channel.
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/update-prerelease.yml
   schedule:
     - cron: '11,41 * * * *'
   workflow_dispatch:
@@ -60,9 +67,14 @@ jobs:
 
   publish:
     needs: check
+    # `!cancelled()` rather than `always()`: a failed check must not publish.
+    # A push-triggered run builds to validate the pipeline even when the package
+    # is current; publish then skips because the AUR already matches.
     if: >-
-      !cancelled() && needs.check.result == 'success' &&
-      (needs.check.outputs.update_needed == 'true' || inputs.force == true)
+      !cancelled() &&
+      (github.event_name == 'push' ||
+       (needs.check.result == 'success' &&
+        (needs.check.outputs.update_needed == 'true' || inputs.force == true)))
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     timeout-minutes: 60
